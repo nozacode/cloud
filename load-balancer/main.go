@@ -1,62 +1,49 @@
 package main
 
 import (
+	"context"
 	"load-balancer/balancer"
 	"load-balancer/handler"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
 func main() {
-	// Инициализируем пул бэкендов
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+
 	backends := []string{
 		"http://localhost:8081",
 		"http://localhost:8082",
 		"http://localhost:8083",
 	}
-
-	// Создаём экземпляр балансировщика
 	lb := balancer.NewLoadBalancer(backends)
 
-	// Запускаем периодическую проверку доступности бэкендов
-	go lb.HealthCheck(10 * time.Second)
+	go lb.HealthCheck(ctx, 10*time.Second)
 
-	// Назначаем обработчик для всех входящих путей
 	http.HandleFunc("/", handler.NewProxyHandler(lb))
 
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		log.Fatalf("Ошибка запуска сервера: %v", err)
-	}
 	log.Println("Load Balancer запущен на порту :8080")
+
+	go func() {
+		err := http.ListenAndServe(":8080", nil)
+		if err != nil {
+			log.Fatalf("Ошибка запуска сервера: %v", err)
+		}
+	}()
+
+	sigReceived := <-signalChan
+	log.Printf("Получен сигнал: %v, завершение работы...", sigReceived)
+
+	cancel()
+
+	log.Println("Балансировщик успешно завершил работу.")
 }
-
-/*package main
-
-import (
-	"load-balancer/handler"
-	"log"
-	"net/http"
-	"time"
-)
-
-func main() {
-	// Инициализируем балансировщик с пулом бэкендов
-	backends := []string{
-		"http://localhost:8081",
-		"http://localhost:8082",
-		"http://localhost:8083",
-	}
-	// Инициализируем балансировщик
-	go lb.HealthCheck(10 * time.Second)
-
-	// Назначаем обработчик для всех входящих путей
-	http.HandleFunc("/", handler.NewProxyHandler(lb))
-
-	log.Println("Load Balancer запущен на порту :8080")
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		log.Fatalf("Ошибка запуска сервера: %v", err)
-	}
-}*/

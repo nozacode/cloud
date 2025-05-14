@@ -1,71 +1,87 @@
 package balancer
 
 import (
-	"log"
+	"context"
 	"net/http"
 	"net/url"
 	"sync"
 	"time"
 )
 
-type LoadBalancer struct {
-	Backends []*Backend
-	curr     int
-	mutex    sync.Mutex
+type Backend struct {
+	URL   *url.URL
+	Alive bool
+	mu    sync.RWMutex
 }
 
-// NewRoundRobinBalancer инициализирует бэкенды
+type LoadBalancer struct {
+	backends []*Backend
+	current  int
+	mu       sync.Mutex
+}
+
 func NewLoadBalancer(backendUrls []string) *LoadBalancer {
 	var backends []*Backend
-
-	for _, rawUrl := range backendUrls {
-		parsedUrl, err := url.Parse(rawUrl)
-		if err == nil {
-			backends = append(backends, &Backend{
-				URL:   parsedUrl,
-				Alive: true, // по умолчанию все живы
-			})
-		}
+	for _, rawURL := range backendUrls {
+		parsedURL, _ := url.Parse(rawURL)
+		backends = append(backends, &Backend{
+			URL:   parsedURL,
+			Alive: true,
+		})
 	}
-
 	return &LoadBalancer{
-		Backends: backends,
+		backends: backends,
 	}
 }
 
-// GetNextBackend реализует Round Robin
-func (lb *LoadBalancer) GetNextBackend() *Backend {
-	lb.mutex.Lock()
-	defer lb.mutex.Unlock()
+func (lb *LoadBalancer) HealthCheck(ctx context.Context, rate time.Duration) {
+	ticker := time.NewTicker(rate)
+	defer ticker.Stop()
 
-	backendsCount := len(lb.Backends)
-	for i := 0; i < backendsCount; i++ {
-		backend := lb.Backends[lb.curr]
-		lb.curr = (lb.curr + 1) % backendsCount
-		if backend.IsAlive() {
-			return backend
-		}
-	}
-	return nil
-}
-
-// HealthCheck проверяет живы ли бэкенды
-/*Эта функция проверяет, доступен ли каждый бэкенд.
-Если нет ответа или ошибка — он считается "мертвым".*/
-func (lb *LoadBalancer) HealthCheck(interval time.Duration) {
 	for {
-		for _, backend := range lb.Backends {
-			go func(b *Backend) {
-				resp, err := http.Get(b.URL.String())
+		select {
+		case <-ticker.C:
+			for _, server := range lb.backends {
+				resp, err := http.Get(server.URL.String())
 				if err != nil || resp.StatusCode >= 500 {
-					b.SetAlive(false)
-					log.Printf("[HealthCheck] %s ➜ DEAD", b.URL)
-					return
+					server.SetAlive(false)
+				} else {
+					server.SetAlive(true)
 				}
-				b.SetAlive(true)
-				log.Printf("[HealthCheck] %s ➜ ALIVE", b.URL)
-			}(backend)
+				if resp != nil {
+					resp.Body.Close()
+				}
+			}
+		case <-ctx.Done():
+			return
 		}
-		time.Sleep(interval)
 	}
+}
+
+func (lb *LoadBalancer) NextBackend() *url.URL {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	n := len(lb.backends)
+	for i := 0; i < n; i++ {
+		lb.current = (lb.current + 1) % n
+		b := lb.backends[lb.current]
+		if b.IsAlive() {
+			return b.URL
+		}
+	}
+
+	return lb.backends[0].URL
+}
+
+func (b *Backend) IsAlive() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.Alive
+}
+
+func (b *Backend) SetAlive(alive bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.Alive = alive
 }

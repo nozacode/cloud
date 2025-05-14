@@ -1,34 +1,24 @@
 package handler
 
 import (
+	"load-balancer/balancer"
 	"log"
 	"net/http"
 	"net/http/httputil"
-
-	"load-balancer/balancer"
 )
 
-// NewProxyHandler возвращает http.HandlerFunc
 func NewProxyHandler(lb *balancer.LoadBalancer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		backend := lb.GetNextBackend()
-		if backend == nil {
-			http.Error(w, "No alive backends available", http.StatusServiceUnavailable)
+		targetURL := lb.NextBackend()
+
+		if targetURL == nil {
+			http.Error(w, "Нет доступных серверов", http.StatusServiceUnavailable)
 			return
 		}
 
-		proxy := httputil.NewSingleHostReverseProxy(backend.URL)
+		proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-		// Логируем
-		log.Printf("Forwarding request to: %s", backend.URL.String())
-
-		// Настраиваем обратный прокси
-		r.Host = backend.URL.Host
-		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("Error proxying to backend %s: %v", backend.URL.String(), err)
-			backend.SetAlive(false) // помечаем как мертвый
-			http.Error(w, "Backend unavailable", http.StatusBadGateway)
-		}
+		log.Printf("Проксируем запрос на %s", targetURL.String())
 
 		proxy.ServeHTTP(w, r)
 	}
